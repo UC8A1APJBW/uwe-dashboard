@@ -4,6 +4,7 @@
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./dashboard-assets/apple-touch-icon.png">
 <meta name="theme-color" content="#2f6fed">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #f4f6f9;
@@ -58,6 +59,16 @@
     z-index: 50; cursor: pointer;
   }
   .client-tag:hover { color: var(--text); border-color: var(--accent); }
+  .data-tag {
+    position: fixed; top: 58px; right: 14px; max-width: 260px; text-align: right;
+    font-size: 11px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
+    z-index: 50;
+  }
+  .sync-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .sync-bar button { font-size: 13px; }
+  .sync-bar .link { background: none; border: none; color: var(--accent); text-decoration: underline; cursor: pointer; font-size: 12px; padding: 4px; }
 
   header.top {
     display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
@@ -365,6 +376,7 @@
 
 <div class="version-tag" id="versionTag"></div>
 <div class="client-tag" id="clientTag" title="Klicken, um diesem Gerät einen anderen Namen zu geben"></div>
+<div class="data-tag" id="dataTag">Datenstand: noch nicht synchronisiert</div>
 
 <div class="wrap" id="mainWrap">
   <header class="top">
@@ -445,9 +457,14 @@
   </div>
 
   <footer>
-    <button id="exportBtn">Daten exportieren (Backup)</button>
-    <button id="importBtn">Daten importieren</button>
-    <input id="importFile" type="file" accept="application/json" style="display:none">
+    <div class="sync-bar">
+      <button id="exportBtn">Daten exportieren (Backup)</button>
+      <button id="importBtn">Daten importieren</button>
+      <input id="importFile" type="file" accept="application/json" style="display:none">
+      <button id="syncBtn">☁️ Sync</button>
+      <button id="loadBtn">☁️ Load</button>
+      <button id="linkDriveBtn" class="link">Gerät mit bestehender Sync-Datei verknüpfen</button>
+    </div>
     <span>Alle Daten werden lokal in diesem Browser gespeichert.</span>
   </footer>
 </div>
@@ -664,7 +681,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T10:45"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
+  const APP_VERSION_DATE = "2026-08-19T11:30"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -677,6 +694,15 @@
   const K_EVENTS = "uweDashboard.events.v1";
   const K_CLIENT_ID = "uweDashboard.clientId.v1";
   const K_BACKUP_SEQ = "uweDashboard.backupSeq.v1";
+  const K_BACKUP_HISTORY = "uweDashboard.backupHistory.v1";
+  const K_DRIVE_FILE_ID = "uweDashboard.driveFileId.v1";
+  const K_LAST_SYNCED_REVISION = "uweDashboard.lastSyncedRevision.v1";
+  const K_DATENSTAND = "uweDashboard.datenstand.v1";
+
+  // Von Uwe einzutragen, siehe Google-Cloud-Console-Anleitung im Chat.
+  const GOOGLE_CLIENT_ID = "DEINE_CLIENT_ID_HIER.apps.googleusercontent.com";
+  const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+  const DRIVE_SYNC_FILENAME = "uwe-dashboard-sync.json";
 
   const DOW = ["Mo","Di","Mi","Do","Fr","Sa","So"];
   const MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli",
@@ -731,11 +757,21 @@
   }
   function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "geraet"; }
 
-  // Eigener, lokaler Zähler für Backups – unabhängig von einem künftigen Sync-Zähler.
+  // Eigener, lokaler Zähler für Backups – unabhängig vom Sync-Zähler in Drive.
   function nextBackupSeq() {
     const seq = (parseInt(lsGet(K_BACKUP_SEQ), 10) || 0) + 1;
     lsSet(K_BACKUP_SEQ, String(seq));
     return seq;
+  }
+  function fmtDateTime(iso) {
+    return new Date(iso).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  function currentDataPayload() {
+    return { stepGoal, steps, fluidGoal, fluids, pushupDefault, pushups, pushupWeekGoals, categories, events };
+  }
+  function setDatenstand(text) {
+    lsSet(K_DATENSTAND, text);
+    const el = $("dataTag"); if (el) el.textContent = "🗂 Datenstand: " + text;
   }
   function load(key, def) { try { return JSON.parse(lsGet(key)) || def; } catch { return def; } }
   function loadNum(key, def) { const n = parseInt(lsGet(key), 10); return (n && n > 0) ? n : def; }
@@ -1683,15 +1719,165 @@
     if (e.key === "Escape") closeFluidModal();
   });
 
+  // ---- Google Drive: Sync/Load (Phase 3) ----
+  let driveTokenClient = null;
+  let driveAccessToken = null;
+
+  function ensureDriveToken() {
+    return new Promise((resolve, reject) => {
+      if (!window.google || !google.accounts || !google.accounts.oauth2) {
+        reject(new Error("Google-Anmeldedienst konnte nicht geladen werden (Internetverbindung prüfen)."));
+        return;
+      }
+      if (driveAccessToken) { resolve(driveAccessToken); return; }
+      if (!driveTokenClient) {
+        driveTokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: DRIVE_SCOPE,
+          callback: (resp) => {
+            if (resp.error) { reject(new Error(resp.error)); return; }
+            driveAccessToken = resp.access_token;
+            resolve(driveAccessToken);
+          },
+          error_callback: (err) => reject(new Error((err && err.type) || "Anmeldung abgebrochen")),
+        });
+      }
+      driveTokenClient.requestAccessToken({ prompt: "" });
+    });
+  }
+
+  async function driveApiFetch(url, options) {
+    const token = await ensureDriveToken();
+    const headers = Object.assign({}, (options && options.headers) || {}, { Authorization: "Bearer " + token });
+    const res = await fetch(url, Object.assign({}, options, { headers }));
+    if (!res.ok) throw new Error(`Drive-Fehler ${res.status}: ${await res.text()}`);
+    return res;
+  }
+
+  async function driveCreateSyncFile(contentStr) {
+    const boundary = "uwe_dash_" + Math.random().toString(36).slice(2);
+    const metadata = { name: DRIVE_SYNC_FILENAME, mimeType: "application/json" };
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${contentStr}\r\n--${boundary}--`;
+    const res = await driveApiFetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }
+    );
+    const json = await res.json();
+    lsSet(K_DRIVE_FILE_ID, json.id);
+    return json.id;
+  }
+
+  async function driveReadSyncFile(fileId) {
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { method: "GET" });
+    return res.json();
+  }
+
+  async function driveWriteSyncFile(fileId, contentStr) {
+    await driveApiFetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: contentStr }
+    );
+  }
+
+  // Erstes Gerät überhaupt: legt die Sync-Datei in Drive an. Weitere Geräte verknüpfen
+  // sich stattdessen über "Gerät verknüpfen" (Datei-ID manuell eintragen).
+  async function ensureDriveFileId() {
+    let id = lsGet(K_DRIVE_FILE_ID);
+    if (id) return id;
+    const payload = {
+      sync_revision: 1, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(),
+      data: currentDataPayload()
+    };
+    id = await driveCreateSyncFile(JSON.stringify(payload, null, 2));
+    lsSet(K_LAST_SYNCED_REVISION, "1");
+    return id;
+  }
+
+  async function doSync() {
+    try {
+      const fileId = await ensureDriveFileId();
+      const remote = await driveReadSyncFile(fileId);
+      const lastKnown = parseInt(lsGet(K_LAST_SYNCED_REVISION), 10) || 0;
+      if ((remote.sync_revision || 0) !== lastKnown) {
+        alert(`Konflikt: In Drive liegt bereits Revision ${remote.sync_revision} (von "${remote.last_sync_client}"), dein zuletzt bekannter Stand ist ${lastKnown}. Bitte zuerst "Load" ausführen, dann erneut synchronisieren.`);
+        return;
+      }
+      const newRevision = lastKnown + 1;
+      const payload = {
+        sync_revision: newRevision, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(),
+        data: currentDataPayload()
+      };
+      await driveWriteSyncFile(fileId, JSON.stringify(payload, null, 2));
+      // Zusätzliche Absicherung, da Drive kein atomares "nur wenn unverändert" kennt:
+      // sofort erneut lesen und prüfen, ob der eigene Schreibvorgang wirklich gewonnen hat.
+      const verify = await driveReadSyncFile(fileId);
+      if (verify.sync_revision !== newRevision || verify.last_sync_client !== getClientId()) {
+        alert("Warnung: Ein anderes Gerät hat möglicherweise gleichzeitig geschrieben. Bitte per \"Load\" den aktuellen Stand prüfen, bevor du weiterarbeitest.");
+        return;
+      }
+      lsSet(K_LAST_SYNCED_REVISION, String(newRevision));
+      pushToHistory(makeBackupPayload("sync", getClientId()));
+      setDatenstand(`Sync · ${getClientId()} · ${fmtDateTime(payload.last_synced_at)}`);
+      alert("Synchronisiert.");
+    } catch (err) {
+      alert("Sync fehlgeschlagen: " + err.message);
+    }
+  }
+
+  async function doLoad() {
+    try {
+      const fileId = await ensureDriveFileId();
+      const remote = await driveReadSyncFile(fileId);
+      const d = remote.data || {};
+      if (d.steps) { steps = d.steps; saveSteps(); }
+      if (d.stepGoal) { stepGoal = d.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
+      if (d.fluids) { fluids = d.fluids; saveFluids(); }
+      if (d.fluidGoal) { fluidGoal = d.fluidGoal; lsSet(K_FLUIDGOAL, String(fluidGoal)); }
+      if (d.pushups) { pushups = d.pushups; savePushups(); }
+      if (d.pushupDefault) { pushupDefault = d.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
+      if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(); }
+      if (d.categories) { categories = d.categories; saveCats(); }
+      if (d.events) { events = d.events; saveEvents(); }
+      lsSet(K_LAST_SYNCED_REVISION, String(remote.sync_revision || 0));
+      pushToHistory(makeBackupPayload("load", remote.last_sync_client));
+      setDatenstand(`Load · von ${remote.last_sync_client} · ${fmtDateTime(remote.last_synced_at || new Date().toISOString())}`);
+      render();
+      alert(`Geladen (Stand von "${remote.last_sync_client}").`);
+    } catch (err) {
+      alert("Load fehlgeschlagen: " + err.message);
+    }
+  }
+
+  $("syncBtn").onclick = doSync;
+  $("loadBtn").onclick = doLoad;
+  $("linkDriveBtn").onclick = () => {
+    const id = (prompt("Datei-ID der bestehenden Sync-Datei (aus der Drive-URL kopieren, der Teil nach /d/ und vor /view):", lsGet(K_DRIVE_FILE_ID) || "") || "").trim();
+    if (id) {
+      lsSet(K_DRIVE_FILE_ID, id);
+      lsSet(K_LAST_SYNCED_REVISION, "0");
+      alert("Verknüpft. Bitte jetzt \"Load\" ausführen, um den aktuellen Stand zu holen.");
+    }
+  };
+
   // Export / Import
-  function makeBackupPayload(trigger) {
+  function makeBackupPayload(trigger, relatedClient) {
     return {
       backup_seq: nextBackupSeq(),
       client_id: getClientId(),
       created_at: new Date().toISOString(),
-      trigger: trigger, // "manuell" | "sync" | "load" (Sync/Load folgen in Phase 3)
-      data: { stepGoal, steps, fluidGoal, fluids, pushupDefault, pushups, pushupWeekGoals, categories, events }
+      trigger: trigger, // "manuell" | "sync" | "load"
+      related_client: relatedClient || getClientId(),
+      data: currentDataPayload()
     };
+  }
+  function pushToHistory(entry) {
+    let hist = [];
+    try { hist = JSON.parse(lsGet(K_BACKUP_HISTORY)) || []; } catch (e) {}
+    hist.push(entry);
+    while (hist.length > 10) hist.shift();
+    lsSet(K_BACKUP_HISTORY, JSON.stringify(hist));
   }
   function downloadBackup(payload) {
     const data = JSON.stringify(payload, null, 2);
@@ -1701,7 +1887,11 @@
     a.download = `uwe-dashboard-backup-${String(payload.backup_seq).padStart(4, "0")}-${slug(payload.client_id)}-${keyOf(new Date())}.json`;
     a.click(); URL.revokeObjectURL(a.href);
   }
-  $("exportBtn").onclick = () => downloadBackup(makeBackupPayload("manuell"));
+  $("exportBtn").onclick = () => {
+    const entry = makeBackupPayload("manuell");
+    pushToHistory(entry);
+    downloadBackup(entry);
+  };
   $("importBtn").onclick = () => $("importFile").click();
   $("importFile").addEventListener("change", (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -1731,6 +1921,8 @@
 
   $("clientTag").textContent = "📱 " + getClientId();
   $("clientTag").onclick = () => { $("clientTag").textContent = "📱 " + renameClient(); };
+
+  { const savedDatenstand = lsGet(K_DATENSTAND); if (savedDatenstand) $("dataTag").textContent = "🗂 Datenstand: " + savedDatenstand; }
 
   if (location.hash === "#suche") enterSolo();
   else render();

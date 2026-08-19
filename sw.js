@@ -1,6 +1,6 @@
 // Uwe-Dashboard – Offline-Cache für die Weboberfläche selbst (Phase 1: offline-fähige Oberfläche).
 // Zählt NICHT die Dashboard-Daten – die bleiben in localStorage bzw. später im Sync-Mechanismus.
-const CACHE_NAME = "uwe-dashboard-shell-v3"; // bei jeder fertiggestellten Version hochzählen
+const CACHE_NAME = "uwe-dashboard-shell-v4"; // bei jeder fertiggestellten Version hochzählen
 
 const ASSETS = [
   "./fitness-dashboard.html",
