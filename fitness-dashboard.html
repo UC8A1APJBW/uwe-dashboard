@@ -50,6 +50,14 @@
     border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
     z-index: 50;
   }
+  .client-tag {
+    position: fixed; top: 34px; right: 14px;
+    font-size: 11px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
+    z-index: 50; cursor: pointer;
+  }
+  .client-tag:hover { color: var(--text); border-color: var(--accent); }
 
   header.top {
     display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
@@ -356,6 +364,7 @@
 </style>
 
 <div class="version-tag" id="versionTag"></div>
+<div class="client-tag" id="clientTag" title="Klicken, um diesem Gerät einen anderen Namen zu geben"></div>
 
 <div class="wrap" id="mainWrap">
   <header class="top">
@@ -655,7 +664,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T10:20"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
+  const APP_VERSION_DATE = "2026-08-19T10:45"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -666,6 +675,8 @@
   const K_PUSHWEEK = "uweDashboard.pushupWeekGoals.v1";
   const K_CATS = "uweDashboard.categories.v1";
   const K_EVENTS = "uweDashboard.events.v1";
+  const K_CLIENT_ID = "uweDashboard.clientId.v1";
+  const K_BACKUP_SEQ = "uweDashboard.backupSeq.v1";
 
   const DOW = ["Mo","Di","Mi","Do","Fr","Sa","So"];
   const MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli",
@@ -702,6 +713,30 @@
   // ---- Persistence ----
   function lsGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function lsSet(key, val) { try { localStorage["setItem"](key, val); } catch (e) {} }
+
+  // Geräte-Kennung für Backups (z. B. "iMac-Uwe") – einmal erfragt, danach gespeichert.
+  function getClientId() {
+    let id = lsGet(K_CLIENT_ID);
+    if (!id) {
+      id = (prompt("Wie soll dieses Gerät heißen? (z. B. iMac-Uwe)", "") || "").trim() || "Unbenanntes-Gerät";
+      lsSet(K_CLIENT_ID, id);
+    }
+    return id;
+  }
+  function renameClient() {
+    const current = getClientId();
+    const next = (prompt("Name für dieses Gerät:", current) || "").trim();
+    if (next) { lsSet(K_CLIENT_ID, next); }
+    return lsGet(K_CLIENT_ID) || current;
+  }
+  function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "geraet"; }
+
+  // Eigener, lokaler Zähler für Backups – unabhängig von einem künftigen Sync-Zähler.
+  function nextBackupSeq() {
+    const seq = (parseInt(lsGet(K_BACKUP_SEQ), 10) || 0) + 1;
+    lsSet(K_BACKUP_SEQ, String(seq));
+    return seq;
+  }
   function load(key, def) { try { return JSON.parse(lsGet(key)) || def; } catch { return def; } }
   function loadNum(key, def) { const n = parseInt(lsGet(key), 10); return (n && n > 0) ? n : def; }
   function saveSteps() { lsSet(K_STEPS, JSON.stringify(steps)); }
@@ -1649,21 +1684,34 @@
   });
 
   // Export / Import
-  $("exportBtn").onclick = () => {
-    const data = JSON.stringify({ stepGoal, steps, fluidGoal, fluids, pushupDefault, pushups, pushupWeekGoals, categories, events }, null, 2);
+  function makeBackupPayload(trigger) {
+    return {
+      backup_seq: nextBackupSeq(),
+      client_id: getClientId(),
+      created_at: new Date().toISOString(),
+      trigger: trigger, // "manuell" | "sync" | "load" (Sync/Load folgen in Phase 3)
+      data: { stepGoal, steps, fluidGoal, fluids, pushupDefault, pushups, pushupWeekGoals, categories, events }
+    };
+  }
+  function downloadBackup(payload) {
+    const data = JSON.stringify(payload, null, 2);
     const blob = new Blob([data], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `uwe-dashboard-backup-${keyOf(new Date())}.json`;
+    a.download = `uwe-dashboard-backup-${String(payload.backup_seq).padStart(4, "0")}-${slug(payload.client_id)}-${keyOf(new Date())}.json`;
     a.click(); URL.revokeObjectURL(a.href);
-  };
+  }
+  $("exportBtn").onclick = () => downloadBackup(makeBackupPayload("manuell"));
   $("importBtn").onclick = () => $("importFile").click();
   $("importFile").addEventListener("change", (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const obj = JSON.parse(reader.result);
+        const parsed = JSON.parse(reader.result);
+        // Neues Format hat ein "data"-Feld mit Metadaten drumherum; altes Format ist flach.
+        const obj = parsed && parsed.data ? parsed.data : parsed;
+        const herkunft = parsed && parsed.client_id ? ` von "${parsed.client_id}"` : "";
         if (obj.steps) { steps = obj.steps; saveSteps(); }
         if (obj.stepGoal) { stepGoal = obj.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
         if (obj.fluids) { fluids = obj.fluids; saveFluids(); }
@@ -1673,13 +1721,16 @@
         if (obj.pushupWeekGoals) { pushupWeekGoals = obj.pushupWeekGoals; savePushWeek(); }
         if (obj.categories) { categories = obj.categories; saveCats(); }
         if (obj.events) { events = obj.events; saveEvents(); }
-        render(); alert("Daten erfolgreich importiert.");
+        render(); alert(`Daten erfolgreich importiert${herkunft}.`);
       } catch { alert("Datei konnte nicht gelesen werden."); }
     };
     reader.readAsText(file); e.target.value = "";
   });
 
   $("versionTag").textContent = "Version " + new Date(APP_VERSION_DATE).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  $("clientTag").textContent = "📱 " + getClientId();
+  $("clientTag").onclick = () => { $("clientTag").textContent = "📱 " + renameClient(); };
 
   if (location.hash === "#suche") enterSolo();
   else render();
