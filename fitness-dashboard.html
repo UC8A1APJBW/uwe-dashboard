@@ -698,7 +698,8 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T12:09"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren (echte Uhrzeit per `date`-Befehl, nicht geschätzt)
+  // Kein von Hand gepflegter Wert mehr (siehe versionTag unten) – document.lastModified
+  // liest automatisch den Last-Modified-Header des Servers bzw. den Datei-Zeitstempel aus.
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -1916,7 +1917,7 @@
     reader.readAsText(file); e.target.value = "";
   });
 
-  $("versionTag").textContent = "Version " + new Date(APP_VERSION_DATE).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  $("versionTag").textContent = "Version " + new Date(document.lastModified).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
   $("clientTag").textContent = "📱 " + getClientId();
   $("clientTag").onclick = () => { $("clientTag").textContent = "📱 " + renameClient(); };
