@@ -1,6 +1,6 @@
 // Uwe-Dashboard – Offline-Cache für die Weboberfläche selbst (Phase 1: offline-fähige Oberfläche).
 // Zählt NICHT die Dashboard-Daten – die bleiben in localStorage bzw. später im Sync-Mechanismus.
-const CACHE_NAME = "uwe-dashboard-shell-v2"; // bei jeder fertiggestellten Version hochzählen
+const CACHE_NAME = "uwe-dashboard-shell-v3"; // bei jeder fertiggestellten Version hochzählen
 
 const ASSETS = [
   "./fitness-dashboard.html",
@@ -12,7 +12,11 @@ const ASSETS = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+    caches.open(CACHE_NAME).then((cache) =>
+      // {cache:"reload"} umgeht den HTTP-Cache des Browsers (GitHub Pages liefert
+      // Cache-Control: max-age=600 – ohne das hier würde teils veraltet gecacht).
+      cache.addAll(ASSETS.map((url) => new Request(url, { cache: "reload" })))
+    )
   );
   self.skipWaiting();
 });
