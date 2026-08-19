@@ -4,7 +4,6 @@
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./dashboard-assets/apple-touch-icon.png">
 <meta name="theme-color" content="#2f6fed">
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #f4f6f9;
@@ -463,9 +462,10 @@
       <input id="importFile" type="file" accept="application/json" style="display:none">
       <button id="syncBtn">☁️ Sync</button>
       <button id="loadBtn">☁️ Load</button>
-      <button id="linkDriveBtn" class="link">Gerät mit bestehender Sync-Datei verknüpfen</button>
+      <input id="syncPickFile" type="file" accept="application/json" style="display:none">
+      <button id="newSyncFileBtn" class="link">Noch keine Sync-Datei? Erstmalig anlegen</button>
     </div>
-    <span>Alle Daten werden lokal in diesem Browser gespeichert.</span>
+    <span>Alle Daten werden lokal in diesem Browser gespeichert. Sync/Load nutzen einen frei wählbaren Ordner (z.&nbsp;B. iCloud Drive).</span>
   </footer>
 </div>
 
@@ -681,7 +681,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T11:30"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
+  const APP_VERSION_DATE = "2026-08-19T12:10"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -695,14 +695,10 @@
   const K_CLIENT_ID = "uweDashboard.clientId.v1";
   const K_BACKUP_SEQ = "uweDashboard.backupSeq.v1";
   const K_BACKUP_HISTORY = "uweDashboard.backupHistory.v1";
-  const K_DRIVE_FILE_ID = "uweDashboard.driveFileId.v1";
   const K_LAST_SYNCED_REVISION = "uweDashboard.lastSyncedRevision.v1";
   const K_DATENSTAND = "uweDashboard.datenstand.v1";
 
-  // Von Uwe einzutragen, siehe Google-Cloud-Console-Anleitung im Chat.
-  const GOOGLE_CLIENT_ID = "DEINE_CLIENT_ID_HIER.apps.googleusercontent.com";
-  const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-  const DRIVE_SYNC_FILENAME = "uwe-dashboard-sync.json";
+  const SYNC_FILENAME = "uwe-dashboard-sync.json"; // immer gleicher Name, damit sie in iCloud Drive eine Datei bleibt
 
   const DOW = ["Mo","Di","Mi","Do","Fr","Sa","So"];
   const MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli",
@@ -1719,108 +1715,83 @@
     if (e.key === "Escape") closeFluidModal();
   });
 
-  // ---- Google Drive: Sync/Load (Phase 3) ----
-  let driveTokenClient = null;
-  let driveAccessToken = null;
+  // ---- Sync/Load über einen frei wählbaren Ordner (z. B. iCloud Drive) ----
+  // Kein Cloud-Dienst direkt angebunden: Sync speichert eine Datei über den normalen
+  // "Speichern"-Dialog, Load liest sie über den normalen "Öffnen"-Dialog. iCloud Drive
+  // (oder jeder andere synchronisierte Ordner) übernimmt den eigentlichen Transport.
 
-  function ensureDriveToken() {
+  function pickSyncFile() {
     return new Promise((resolve, reject) => {
-      if (!window.google || !google.accounts || !google.accounts.oauth2) {
-        reject(new Error("Google-Anmeldedienst konnte nicht geladen werden (Internetverbindung prüfen)."));
-        return;
-      }
-      if (driveAccessToken) { resolve(driveAccessToken); return; }
-      if (!driveTokenClient) {
-        driveTokenClient = google.accounts.oauth2.initTokenClient({
-          client_id: GOOGLE_CLIENT_ID,
-          scope: DRIVE_SCOPE,
-          callback: (resp) => {
-            if (resp.error) { reject(new Error(resp.error)); return; }
-            driveAccessToken = resp.access_token;
-            resolve(driveAccessToken);
-          },
-          error_callback: (err) => reject(new Error((err && err.type) || "Anmeldung abgebrochen")),
-        });
-      }
-      driveTokenClient.requestAccessToken({ prompt: "" });
+      const input = $("syncPickFile");
+      input.onchange = () => {
+        const file = input.files[0];
+        input.value = "";
+        if (!file) { reject(new Error("Keine Datei ausgewählt.")); return; }
+        const reader = new FileReader();
+        reader.onload = () => {
+          try { resolve(JSON.parse(reader.result)); }
+          catch { reject(new Error("Datei konnte nicht gelesen werden.")); }
+        };
+        reader.onerror = () => reject(new Error("Datei konnte nicht gelesen werden."));
+        reader.readAsText(file);
+      };
+      input.click();
     });
   }
 
-  async function driveApiFetch(url, options) {
-    const token = await ensureDriveToken();
-    const headers = Object.assign({}, (options && options.headers) || {}, { Authorization: "Bearer " + token });
-    const res = await fetch(url, Object.assign({}, options, { headers }));
-    if (!res.ok) throw new Error(`Drive-Fehler ${res.status}: ${await res.text()}`);
-    return res;
+  function saveSyncFile(payload) {
+    const data = JSON.stringify(payload, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = SYNC_FILENAME; // immer gleicher Name – beim Speichern in denselben Ordner überschreiben
+    a.click(); URL.revokeObjectURL(a.href);
   }
 
-  async function driveCreateSyncFile(contentStr) {
-    const boundary = "uwe_dash_" + Math.random().toString(36).slice(2);
-    const metadata = { name: DRIVE_SYNC_FILENAME, mimeType: "application/json" };
-    const body =
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${contentStr}\r\n--${boundary}--`;
-    const res = await driveApiFetch(
-      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
-      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }
-    );
-    const json = await res.json();
-    lsSet(K_DRIVE_FILE_ID, json.id);
-    return json.id;
+  function applyRemoteData(d) {
+    if (d.steps) { steps = d.steps; saveSteps(); }
+    if (d.stepGoal) { stepGoal = d.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
+    if (d.fluids) { fluids = d.fluids; saveFluids(); }
+    if (d.fluidGoal) { fluidGoal = d.fluidGoal; lsSet(K_FLUIDGOAL, String(fluidGoal)); }
+    if (d.pushups) { pushups = d.pushups; savePushups(); }
+    if (d.pushupDefault) { pushupDefault = d.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
+    if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(); }
+    if (d.categories) { categories = d.categories; saveCats(); }
+    if (d.events) { events = d.events; saveEvents(); }
   }
 
-  async function driveReadSyncFile(fileId) {
-    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { method: "GET" });
-    return res.json();
+  // Nur beim allerersten Gerät einmalig: legt Revision 1 an.
+  async function createNewSyncFile() {
+    try {
+      const payload = { sync_revision: 1, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(), data: currentDataPayload() };
+      saveSyncFile(payload);
+      lsSet(K_LAST_SYNCED_REVISION, "1");
+      pushToHistory(makeBackupPayload("sync", getClientId()));
+      setDatenstand(`Sync · ${getClientId()} · ${fmtDateTime(payload.last_synced_at)}`);
+      alert(`Neue Sync-Datei "${SYNC_FILENAME}" wurde zum Speichern angeboten. Bitte in deinen iCloud-Drive-Ordner ablegen – von dort holen sich weitere Geräte den Stand per "Load".`);
+    } catch (err) {
+      alert("Anlegen fehlgeschlagen: " + err.message);
+    }
   }
 
-  async function driveWriteSyncFile(fileId, contentStr) {
-    await driveApiFetch(
-      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
-      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: contentStr }
-    );
-  }
-
-  // Erstes Gerät überhaupt: legt die Sync-Datei in Drive an. Weitere Geräte verknüpfen
-  // sich stattdessen über "Gerät verknüpfen" (Datei-ID manuell eintragen).
-  async function ensureDriveFileId() {
-    let id = lsGet(K_DRIVE_FILE_ID);
-    if (id) return id;
-    const payload = {
-      sync_revision: 1, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(),
-      data: currentDataPayload()
-    };
-    id = await driveCreateSyncFile(JSON.stringify(payload, null, 2));
-    lsSet(K_LAST_SYNCED_REVISION, "1");
-    return id;
-  }
-
+  // Schritt 1: aktuelle Datei zur Prüfung auswählen. Schritt 2 (nur bei Übereinstimmung):
+  // neue Version zum Speichern anbieten. Kein Rück-Lese-Schritt wie bei einer echten API
+  // möglich – das ist der bewusste Kompromiss dieses einfacheren Wegs (siehe Chat).
   async function doSync() {
     try {
-      const fileId = await ensureDriveFileId();
-      const remote = await driveReadSyncFile(fileId);
+      const remote = await pickSyncFile();
       const lastKnown = parseInt(lsGet(K_LAST_SYNCED_REVISION), 10) || 0;
       if ((remote.sync_revision || 0) !== lastKnown) {
-        alert(`Konflikt: In Drive liegt bereits Revision ${remote.sync_revision} (von "${remote.last_sync_client}"), dein zuletzt bekannter Stand ist ${lastKnown}. Bitte zuerst "Load" ausführen, dann erneut synchronisieren.`);
+        alert(`Konflikt: Die ausgewählte Datei hat Revision ${remote.sync_revision} (von "${remote.last_sync_client}"), dein zuletzt bekannter Stand ist ${lastKnown}. Bitte zuerst "Load" ausführen, dann erneut synchronisieren.`);
         return;
       }
       const newRevision = lastKnown + 1;
-      const payload = {
-        sync_revision: newRevision, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(),
-        data: currentDataPayload()
-      };
-      await driveWriteSyncFile(fileId, JSON.stringify(payload, null, 2));
-      // Zusätzliche Absicherung, da Drive kein atomares "nur wenn unverändert" kennt:
-      // sofort erneut lesen und prüfen, ob der eigene Schreibvorgang wirklich gewonnen hat.
-      const verify = await driveReadSyncFile(fileId);
-      if (verify.sync_revision !== newRevision || verify.last_sync_client !== getClientId()) {
-        alert("Warnung: Ein anderes Gerät hat möglicherweise gleichzeitig geschrieben. Bitte per \"Load\" den aktuellen Stand prüfen, bevor du weiterarbeitest.");
-        return;
-      }
+      const payload = { sync_revision: newRevision, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(), data: currentDataPayload() };
+      saveSyncFile(payload);
       lsSet(K_LAST_SYNCED_REVISION, String(newRevision));
       pushToHistory(makeBackupPayload("sync", getClientId()));
       setDatenstand(`Sync · ${getClientId()} · ${fmtDateTime(payload.last_synced_at)}`);
-      alert("Synchronisiert.");
+      alert(`Neue Version wurde zum Speichern angeboten. Bitte über die gerade geprüfte Datei am selben Ort speichern ("${SYNC_FILENAME}").`);
     } catch (err) {
       alert("Sync fehlgeschlagen: " + err.message);
     }
@@ -1828,18 +1799,8 @@
 
   async function doLoad() {
     try {
-      const fileId = await ensureDriveFileId();
-      const remote = await driveReadSyncFile(fileId);
-      const d = remote.data || {};
-      if (d.steps) { steps = d.steps; saveSteps(); }
-      if (d.stepGoal) { stepGoal = d.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
-      if (d.fluids) { fluids = d.fluids; saveFluids(); }
-      if (d.fluidGoal) { fluidGoal = d.fluidGoal; lsSet(K_FLUIDGOAL, String(fluidGoal)); }
-      if (d.pushups) { pushups = d.pushups; savePushups(); }
-      if (d.pushupDefault) { pushupDefault = d.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
-      if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(); }
-      if (d.categories) { categories = d.categories; saveCats(); }
-      if (d.events) { events = d.events; saveEvents(); }
+      const remote = await pickSyncFile();
+      applyRemoteData(remote.data || {});
       lsSet(K_LAST_SYNCED_REVISION, String(remote.sync_revision || 0));
       pushToHistory(makeBackupPayload("load", remote.last_sync_client));
       setDatenstand(`Load · von ${remote.last_sync_client} · ${fmtDateTime(remote.last_synced_at || new Date().toISOString())}`);
@@ -1852,14 +1813,7 @@
 
   $("syncBtn").onclick = doSync;
   $("loadBtn").onclick = doLoad;
-  $("linkDriveBtn").onclick = () => {
-    const id = (prompt("Datei-ID der bestehenden Sync-Datei (aus der Drive-URL kopieren, der Teil nach /d/ und vor /view):", lsGet(K_DRIVE_FILE_ID) || "") || "").trim();
-    if (id) {
-      lsSet(K_DRIVE_FILE_ID, id);
-      lsSet(K_LAST_SYNCED_REVISION, "0");
-      alert("Verknüpft. Bitte jetzt \"Load\" ausführen, um den aktuellen Stand zu holen.");
-    }
-  };
+  $("newSyncFileBtn").onclick = createNewSyncFile;
 
   // Export / Import
   function makeBackupPayload(trigger, relatedClient) {
@@ -1902,15 +1856,7 @@
         // Neues Format hat ein "data"-Feld mit Metadaten drumherum; altes Format ist flach.
         const obj = parsed && parsed.data ? parsed.data : parsed;
         const herkunft = parsed && parsed.client_id ? ` von "${parsed.client_id}"` : "";
-        if (obj.steps) { steps = obj.steps; saveSteps(); }
-        if (obj.stepGoal) { stepGoal = obj.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
-        if (obj.fluids) { fluids = obj.fluids; saveFluids(); }
-        if (obj.fluidGoal) { fluidGoal = obj.fluidGoal; lsSet(K_FLUIDGOAL, String(fluidGoal)); }
-        if (obj.pushups) { pushups = obj.pushups; savePushups(); }
-        if (obj.pushupDefault) { pushupDefault = obj.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
-        if (obj.pushupWeekGoals) { pushupWeekGoals = obj.pushupWeekGoals; savePushWeek(); }
-        if (obj.categories) { categories = obj.categories; saveCats(); }
-        if (obj.events) { events = obj.events; saveEvents(); }
+        applyRemoteData(obj);
         render(); alert(`Daten erfolgreich importiert${herkunft}.`);
       } catch { alert("Datei konnte nicht gelesen werden."); }
     };
