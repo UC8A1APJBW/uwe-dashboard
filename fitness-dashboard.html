@@ -681,7 +681,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T12:10"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
+  const APP_VERSION_DATE = "2026-08-19T13:05"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -789,6 +789,7 @@
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   }
   function parseKey(k) { const [y,m,d] = k.split("-").map(Number); return new Date(y, m-1, d); }
+  function timeKeyOf(d) { return `${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}`; }
   function fmt(n) { return Math.round(n).toLocaleString("de-DE"); }
   function timeOf(iso) { return new Date(iso).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); }
   function uid() { return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "id" + Date.now() + Math.random().toString(36).slice(2); }
@@ -1777,21 +1778,42 @@
   // Schritt 1: aktuelle Datei zur Prüfung auswählen. Schritt 2 (nur bei Übereinstimmung):
   // neue Version zum Speichern anbieten. Kein Rück-Lese-Schritt wie bei einer echten API
   // möglich – das ist der bewusste Kompromiss dieses einfacheren Wegs (siehe Chat).
+  // Zwei bewusste Klicks statt eines durchgehenden Ablaufs: Zwischen "Datei zum Prüfen
+  // öffnen" und "neue Version speichern" kann eine beliebig lange Pause liegen (der
+  // native Auswahldialog wartet auf dich), und manche Browser lassen den zweiten Dialog
+  // dann nicht mehr automatisch zu. Deshalb löst jeder Schritt einen eigenen frischen Klick aus.
+  let pendingSync = null;
+
   async function doSync() {
+    if (pendingSync) {
+      try {
+        saveSyncFile(pendingSync);
+        lsSet(K_LAST_SYNCED_REVISION, String(pendingSync.sync_revision));
+        pushToHistory(makeBackupPayload("sync", getClientId()));
+        setDatenstand(`Sync · ${getClientId()} · ${fmtDateTime(pendingSync.last_synced_at)}`);
+      } catch (err) {
+        alert("Speichern fehlgeschlagen: " + err.message);
+      } finally {
+        pendingSync = null;
+        $("syncBtn").textContent = "☁️ Sync";
+      }
+      return;
+    }
     try {
-      const remote = await pickSyncFile();
       const lastKnown = parseInt(lsGet(K_LAST_SYNCED_REVISION), 10) || 0;
+      if (!lastKnown) {
+        alert('Für dieses Gerät wurde noch nicht synchronisiert.\n\n– Gibt es bereits eine Sync-Datei von einem anderen Gerät? Dann bitte zuerst "☁️ Load" verwenden.\n– Ist dies das allererste Mal überhaupt? Dann bitte "Noch keine Sync-Datei? Erstmalig anlegen" verwenden.');
+        return;
+      }
+      alert(`Schritt 1 von 2: Bitte jetzt die Datei "${SYNC_FILENAME}" aus deinem Sync-Ordner auswählen und öffnen, damit auf Änderungen geprüft werden kann.`);
+      const remote = await pickSyncFile();
       if ((remote.sync_revision || 0) !== lastKnown) {
         alert(`Konflikt: Die ausgewählte Datei hat Revision ${remote.sync_revision} (von "${remote.last_sync_client}"), dein zuletzt bekannter Stand ist ${lastKnown}. Bitte zuerst "Load" ausführen, dann erneut synchronisieren.`);
         return;
       }
-      const newRevision = lastKnown + 1;
-      const payload = { sync_revision: newRevision, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(), data: currentDataPayload() };
-      saveSyncFile(payload);
-      lsSet(K_LAST_SYNCED_REVISION, String(newRevision));
-      pushToHistory(makeBackupPayload("sync", getClientId()));
-      setDatenstand(`Sync · ${getClientId()} · ${fmtDateTime(payload.last_synced_at)}`);
-      alert(`Neue Version wurde zum Speichern angeboten. Bitte über die gerade geprüfte Datei am selben Ort speichern ("${SYNC_FILENAME}").`);
+      pendingSync = { sync_revision: lastKnown + 1, last_sync_client: getClientId(), last_synced_at: new Date().toISOString(), data: currentDataPayload() };
+      $("syncBtn").textContent = "☁️ Sync – jetzt erneut klicken zum Speichern";
+      alert(`Kein Konflikt. Bitte jetzt noch einmal auf "Sync" klicken, um "${SYNC_FILENAME}" zu speichern (vorhandene Datei am selben Ort ersetzen).`);
     } catch (err) {
       alert("Sync fehlgeschlagen: " + err.message);
     }
@@ -1799,6 +1821,7 @@
 
   async function doLoad() {
     try {
+      alert(`Bitte jetzt die Datei "${SYNC_FILENAME}" aus deinem Sync-Ordner auswählen und öffnen.`);
       const remote = await pickSyncFile();
       applyRemoteData(remote.data || {});
       lsSet(K_LAST_SYNCED_REVISION, String(remote.sync_revision || 0));
@@ -1838,7 +1861,8 @@
     const blob = new Blob([data], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `uwe-dashboard-backup-${String(payload.backup_seq).padStart(4, "0")}-${slug(payload.client_id)}-${keyOf(new Date())}.json`;
+    const now = new Date();
+    a.download = `uwe-dashboard-backup-${String(payload.backup_seq).padStart(4, "0")}-${slug(payload.client_id)}-${keyOf(now)}-${timeKeyOf(now)}.json`;
     a.click(); URL.revokeObjectURL(a.href);
   }
   $("exportBtn").onclick = () => {
