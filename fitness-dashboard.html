@@ -65,6 +65,7 @@
     border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
     z-index: 50;
   }
+  .data-tag.local { top: 82px; }
   .sync-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .sync-bar button { font-size: 13px; }
   .sync-bar .link { background: none; border: none; color: var(--accent); text-decoration: underline; cursor: pointer; font-size: 12px; padding: 4px; }
@@ -376,6 +377,7 @@
 <div class="version-tag" id="versionTag"></div>
 <div class="client-tag" id="clientTag" title="Klicken, um diesem Gerät einen anderen Namen zu geben"></div>
 <div class="data-tag" id="dataTag">Datenstand: noch nicht synchronisiert</div>
+<div class="data-tag local" id="localTag">Datenstand: lokal noch keine Änderung</div>
 
 <div class="wrap" id="mainWrap">
   <header class="top">
@@ -681,7 +683,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION_DATE = "2026-08-19T11:49"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren (echte Uhrzeit per `date`-Befehl, nicht geschätzt)
+  const APP_VERSION_DATE = "2026-08-19T12:09"; // Datum + Uhrzeit der letzten fertiggestellten Version – bei jeder Änderung hier aktualisieren (echte Uhrzeit per `date`-Befehl, nicht geschätzt)
 
   const K_STEPS = "fitnessDashboard.steps.v1";
   const K_STEPGOAL = "fitnessDashboard.goal.v1";
@@ -697,6 +699,7 @@
   const K_BACKUP_HISTORY = "uweDashboard.backupHistory.v1";
   const K_LAST_SYNCED_REVISION = "uweDashboard.lastSyncedRevision.v1";
   const K_DATENSTAND = "uweDashboard.datenstand.v1";
+  const K_LAST_LOCAL_CHANGE = "uweDashboard.lastLocalChange.v1";
 
   const SYNC_FILENAME = "uwe-dashboard-sync.json"; // immer gleicher Name, damit sie in iCloud Drive eine Datei bleibt
 
@@ -769,14 +772,23 @@
     lsSet(K_DATENSTAND, text);
     const el = $("dataTag"); if (el) el.textContent = "🗂 Datenstand: " + text;
   }
+  // Zeitpunkt der letzten echten lokalen Änderung (nicht bei Sync/Load/Import –
+  // das sind übernommene Stände, keine neuen Eingaben auf diesem Gerät).
+  function markLocalChange() {
+    const now = new Date().toISOString();
+    lsSet(K_LAST_LOCAL_CHANGE, now);
+    const el = $("localTag");
+    if (el) el.textContent = `🗂 Datenstand: lokal · ${getClientId()} · ${fmtDateTime(now)}`;
+  }
   function load(key, def) { try { return JSON.parse(lsGet(key)) || def; } catch { return def; } }
   function loadNum(key, def) { const n = parseInt(lsGet(key), 10); return (n && n > 0) ? n : def; }
-  function saveSteps() { lsSet(K_STEPS, JSON.stringify(steps)); }
-  function saveFluids() { lsSet(K_FLUIDS, JSON.stringify(fluids)); }
-  function savePushups() { lsSet(K_PUSHUPS, JSON.stringify(pushups)); }
-  function savePushWeek() { lsSet(K_PUSHWEEK, JSON.stringify(pushupWeekGoals)); }
-  function saveCats() { lsSet(K_CATS, JSON.stringify(categories)); }
-  function saveEvents() {
+  function saveSteps(markLocal = true) { lsSet(K_STEPS, JSON.stringify(steps)); if (markLocal) markLocalChange(); }
+  function saveFluids(markLocal = true) { lsSet(K_FLUIDS, JSON.stringify(fluids)); if (markLocal) markLocalChange(); }
+  function savePushups(markLocal = true) { lsSet(K_PUSHUPS, JSON.stringify(pushups)); if (markLocal) markLocalChange(); }
+  function savePushWeek(markLocal = true) { lsSet(K_PUSHWEEK, JSON.stringify(pushupWeekGoals)); if (markLocal) markLocalChange(); }
+  function saveCats(markLocal = true) { lsSet(K_CATS, JSON.stringify(categories)); if (markLocal) markLocalChange(); }
+  function saveEvents(markLocal = true) {
+    if (markLocal) markLocalChange();
     try { localStorage.setItem(K_EVENTS, JSON.stringify(events)); return "ok"; }
     catch (e) {
       if (e && (e.name === "QuotaExceededError" || e.code === 22 || e.code === 1014)) return "quota";
@@ -894,7 +906,7 @@
       subtitle: "Schritte pro Tag erfassen · Ziel-Erreichung nach Farbe",
       goalLabel: "Tagesziel", goalUnit: "Schritte", goalStep: 500,
       getGoal: () => stepGoal,
-      setGoal: (g) => { stepGoal = g; lsSet(K_STEPGOAL, String(g)); },
+      setGoal: (g) => { stepGoal = g; lsSet(K_STEPGOAL, String(g)); markLocalChange(); },
       getDayGoal: () => stepGoal,
       getValue: (key) => steps[key] || 0,
       cellText: (v) => v > 0 ? fmt(v) : "",
@@ -906,7 +918,7 @@
       subtitle: "Trinkmenge erfassen · Wasser, Kaffee, Tee · Erreichung nach Farbe",
       goalLabel: "Mindestmenge", goalUnit: "ml", goalStep: 100,
       getGoal: () => fluidGoal,
-      setGoal: (g) => { fluidGoal = g; lsSet(K_FLUIDGOAL, String(g)); },
+      setGoal: (g) => { fluidGoal = g; lsSet(K_FLUIDGOAL, String(g)); markLocalChange(); },
       getDayGoal: () => fluidGoal,
       getValue: (key) => fluidTotal(key),
       cellText: (v) => v > 0 ? fmt(v) + " ml" : "",
@@ -918,7 +930,7 @@
       subtitle: "Liegestütze pro Tag · Wochenziel je Woche änderbar · Fortschritt nach Farbe",
       goalLabel: "Tagesziel", goalUnit: "Liegestütze", goalStep: 1,
       getGoal: () => pushupDefault,
-      setGoal: (g) => { pushupDefault = g; lsSet(K_PUSHDEFAULT, String(g)); },
+      setGoal: (g) => { pushupDefault = g; lsSet(K_PUSHDEFAULT, String(g)); markLocalChange(); },
       getDayGoal: (key) => weekGoalForDay(key),
       getValue: (key) => pushups[key] || 0,
       cellText: (v) => v > 0 ? fmt(v) : "",
@@ -1750,15 +1762,17 @@
   }
 
   function applyRemoteData(d) {
-    if (d.steps) { steps = d.steps; saveSteps(); }
+    // markLocal=false: das sind übernommene Stände (Sync/Load/Import), keine neuen
+    // lokalen Eingaben – sollen die "lokal zuletzt geändert"-Anzeige nicht verfälschen.
+    if (d.steps) { steps = d.steps; saveSteps(false); }
     if (d.stepGoal) { stepGoal = d.stepGoal; lsSet(K_STEPGOAL, String(stepGoal)); }
-    if (d.fluids) { fluids = d.fluids; saveFluids(); }
+    if (d.fluids) { fluids = d.fluids; saveFluids(false); }
     if (d.fluidGoal) { fluidGoal = d.fluidGoal; lsSet(K_FLUIDGOAL, String(fluidGoal)); }
-    if (d.pushups) { pushups = d.pushups; savePushups(); }
+    if (d.pushups) { pushups = d.pushups; savePushups(false); }
     if (d.pushupDefault) { pushupDefault = d.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
-    if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(); }
-    if (d.categories) { categories = d.categories; saveCats(); }
-    if (d.events) { events = d.events; saveEvents(); }
+    if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(false); }
+    if (d.categories) { categories = d.categories; saveCats(false); }
+    if (d.events) { events = d.events; saveEvents(false); }
   }
 
   // Nur beim allerersten Gerät einmalig: legt Revision 1 an.
@@ -1893,6 +1907,7 @@
   $("clientTag").onclick = () => { $("clientTag").textContent = "📱 " + renameClient(); };
 
   { const savedDatenstand = lsGet(K_DATENSTAND); if (savedDatenstand) $("dataTag").textContent = "🗂 Datenstand: " + savedDatenstand; }
+  { const savedLocal = lsGet(K_LAST_LOCAL_CHANGE); if (savedLocal) $("localTag").textContent = `🗂 Datenstand: lokal · ${getClientId()} · ${fmtDateTime(savedLocal)}`; }
 
   if (location.hash === "#suche") enterSolo();
   else render();
