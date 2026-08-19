@@ -40,32 +40,46 @@
     color: var(--text);
     padding: 24px;
     -webkit-font-smoothing: antialiased;
+    transition: padding-top .15s ease;
   }
+  :root { --banner-offset: 0px; }
+  body.has-update-banner { padding-top: 62px; --banner-offset: 42px; }
   .wrap { max-width: 1080px; margin: 0 auto; }
 
+  .update-banner {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0;
+    background: var(--accent); color: #fff;
+    text-align: center; padding: 10px 16px;
+    font-size: 14px; font-weight: 600;
+    cursor: pointer; z-index: 200;
+    box-shadow: var(--shadow);
+  }
+  .update-banner:hover { filter: brightness(1.08); }
+
   .version-tag {
-    position: fixed; top: 10px; right: 14px;
+    position: fixed; top: calc(10px + var(--banner-offset)); right: 14px;
     font-size: 11px; color: var(--muted);
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
-    z-index: 50;
+    z-index: 50; transition: top .15s ease;
   }
   .client-tag {
-    position: fixed; top: 34px; right: 14px;
+    position: fixed; top: calc(34px + var(--banner-offset)); right: 14px;
     font-size: 11px; color: var(--muted);
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
-    z-index: 50; cursor: pointer;
+    z-index: 50; cursor: pointer; transition: top .15s ease;
   }
   .client-tag:hover { color: var(--text); border-color: var(--accent); }
   .data-tag {
-    position: fixed; top: 58px; right: 14px; max-width: 260px; text-align: right;
+    position: fixed; top: calc(58px + var(--banner-offset)); right: 14px; max-width: 260px; text-align: right;
     font-size: 11px; color: var(--muted);
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 3px 9px; box-shadow: var(--shadow);
-    z-index: 50;
+    z-index: 50; transition: top .15s ease;
   }
-  .data-tag.local { top: 82px; }
+  .data-tag.local { top: calc(82px + var(--banner-offset)); }
   .sync-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .sync-bar button { font-size: 13px; }
   .sync-bar .link { background: none; border: none; color: var(--accent); text-decoration: underline; cursor: pointer; font-size: 12px; padding: 4px; }
@@ -374,6 +388,7 @@
   .lightbox img { max-width: 95%; max-height: 95%; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,.5); }
 </style>
 
+<div class="update-banner" id="updateBanner" title="Klicken zum Neuladen">🔄 Neue Programm-Version verfügbar &ndash; bitte neu laden</div>
 <div class="version-tag" id="versionTag"></div>
 <div class="client-tag" id="clientTag" title="Klicken, um diesem Gerät einen anderen Namen zu geben"></div>
 <div class="data-tag" id="dataTag">Datenstand: noch nicht synchronisiert</div>
@@ -1905,6 +1920,7 @@
 
   $("clientTag").textContent = "📱 " + getClientId();
   $("clientTag").onclick = () => { $("clientTag").textContent = "📱 " + renameClient(); };
+  $("updateBanner").onclick = () => location.reload();
 
   { const savedDatenstand = lsGet(K_DATENSTAND); if (savedDatenstand) $("dataTag").textContent = "🗂 Datenstand: " + savedDatenstand; }
   { const savedLocal = lsGet(K_LAST_LOCAL_CHANGE); if (savedLocal) $("localTag").textContent = `🗂 Datenstand: lokal · ${getClientId()} · ${fmtDateTime(savedLocal)}`; }
@@ -1923,7 +1939,22 @@
   // Phase 1: offline-fähige Oberfläche. Läuft nur über http(s), nicht über file://.
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./sw.js").catch(() => {});
+      // War die Seite beim Laden bereits von einem Service Worker kontrolliert?
+      // Nur dann bedeutet ein späterer Kontrollwechsel eine echte Aktualisierung –
+      // beim allerersten Besuch (noch kein Service Worker aktiv) nicht den Hinweis zeigen.
+      const hadControllerAtLoad = !!navigator.serviceWorker.controller;
+
+      navigator.serviceWorker.register("./sw.js").then((reg) => {
+        // Auch bei offen gelassener Seite aktiv nach einer neueren Version suchen,
+        // nicht nur beim nächsten Öffnen/Neuladen.
+        setInterval(() => reg.update().catch(() => {}), 5 * 60 * 1000);
+      }).catch(() => {});
+
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (!hadControllerAtLoad) return;
+        const banner = document.getElementById("updateBanner");
+        if (banner) { banner.style.display = "block"; document.body.classList.add("has-update-banner"); }
+      });
     });
   }
 </script>
