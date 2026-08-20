@@ -262,6 +262,9 @@
     background: var(--panel); border-radius: 16px; padding: 22px;
     width: 340px; max-height: 90vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.3);
   }
+  @media (min-width: 700px) {
+    #entryModalBg .modal { width: 560px; }   /* Bearbeiten-Pop-up auf Desktop breiter -> breiteres Notizfeld */
+  }
   .modal h3 { margin: 0 0 4px; font-size: 17px; }
   .modal .mdate { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
   .modal input.num {
@@ -686,6 +689,8 @@
 <script>
 (function () {
   "use strict";
+
+  const $ = (id) => document.getElementById(id);   // früh definiert, damit auch der Init-Code (z.B. Erstbefüllung der Kategorien) ihn nutzen kann
 
   // Kein von Hand gepflegter Wert mehr (siehe versionTag unten) – document.lastModified
   // liest automatisch den Last-Modified-Header des Servers bzw. den Datei-Zeitstempel aus.
@@ -1211,7 +1216,9 @@
     if (e) { e.done = !e.done; saveEvents(); afterDataChange(); }
   }
   function deleteEntry(id) {
-    events = events.filter(e => e.id !== id);
+    const e = events.find(x => x.id === id);
+    if (e && !confirm(`Eintrag „${e.title}“ wirklich löschen?`)) return;
+    events = events.filter(x => x.id !== id);
     saveEvents(); closeEntryModal(); afterDataChange();
   }
 
@@ -1644,7 +1651,6 @@
   }
 
   // ---- Elemente & Events ----
-  const $ = (id) => document.getElementById(id);
   const goalInput = $("goalInput"), monthTitle = $("monthTitle"),
         dowRow = $("dowRow"), calBody = $("calBody"), monthSummary = $("monthSummary"),
         aDowRow = $("aDowRow"), aCalBody = $("aCalBody"),
