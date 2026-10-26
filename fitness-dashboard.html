@@ -1783,7 +1783,9 @@
     if (d.pushupDefault) { pushupDefault = d.pushupDefault; lsSet(K_PUSHDEFAULT, String(pushupDefault)); }
     if (d.pushupWeekGoals) { pushupWeekGoals = d.pushupWeekGoals; savePushWeek(false); }
     if (d.categories) { categories = d.categories; saveCats(false); }
-    if (d.events) { events = d.events; saveEvents(false); }
+    let status = "ok";
+    if (d.events) { events = d.events; status = saveEvents(false); }
+    return status;   // "ok" | "quota" | "unavailable" – damit Import/Load ein stilles Scheitern melden können
   }
 
   // Nur beim allerersten Gerät einmalig: legt Revision 1 an.
@@ -1848,12 +1850,14 @@
     try {
       alert(`Bitte jetzt die Datei "${SYNC_FILENAME}" aus deinem Sync-Ordner auswählen und öffnen.`);
       const remote = await pickSyncFile();
-      applyRemoteData(remote.data || {});
+      const res = applyRemoteData(remote.data || {});
       lsSet(K_LAST_SYNCED_REVISION, String(remote.sync_revision || 0));
       pushToHistory(makeBackupPayload("load", remote.last_sync_client));
       setDatenstand(`Load · von ${remote.last_sync_client} · ${fmtDateTime(remote.last_synced_at || new Date().toISOString())}`);
       render();
-      alert(`Geladen (Stand von "${remote.last_sync_client}").`);
+      if (res === "quota") alert("Load unvollständig: Lokaler Speicher voll (meist wegen Bildern). Termine/Aufgaben wurden NICHT dauerhaft gespeichert und sind nach dem Neuladen wieder weg. Lösung: Bilder verkleinern/entfernen oder auf IndexedDB umstellen.");
+      else if (res === "unavailable") alert("Load fehlgeschlagen: Kein Zugriff auf den lokalen Speicher.");
+      else alert(`Geladen (Stand von "${remote.last_sync_client}").`);
     } catch (err) {
       alert("Load fehlgeschlagen: " + err.message);
     }
@@ -1905,8 +1909,11 @@
         // Neues Format hat ein "data"-Feld mit Metadaten drumherum; altes Format ist flach.
         const obj = parsed && parsed.data ? parsed.data : parsed;
         const herkunft = parsed && parsed.client_id ? ` von "${parsed.client_id}"` : "";
-        applyRemoteData(obj);
-        render(); alert(`Daten erfolgreich importiert${herkunft}.`);
+        const res = applyRemoteData(obj);
+        render();
+        if (res === "quota") alert("Import unvollständig: Der lokale Speicher ist voll (localStorage, meist ~5 MB) – vermutlich wegen Bildern in den Terminen. Die Termine/Aufgaben konnten NICHT dauerhaft gespeichert werden und sind nach dem Neuladen wieder weg. Lösung: Bilder verkleinern/entfernen oder auf IndexedDB umstellen.");
+        else if (res === "unavailable") alert("Import fehlgeschlagen: Kein Zugriff auf den lokalen Speicher (localStorage nicht verfügbar).");
+        else alert(`Daten erfolgreich importiert${herkunft}.`);
       } catch { alert("Datei konnte nicht gelesen werden."); }
     };
     reader.readAsText(file); e.target.value = "";
